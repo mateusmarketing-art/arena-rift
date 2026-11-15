@@ -1,0 +1,88 @@
+name: Gerar APK Android
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: "4.3"
+
+jobs:
+  apk:
+    name: Exportar APK
+    runs-on: ubuntu-22.04
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Preparar Godot, SDK Android e chave de assinatura
+        shell: bash
+        run: |
+          set -e
+          mkdir -p ~/.local/share/godot/export_templates ~/.config/godot
+          if [ -d /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ] && [ "$HOME" != "/root" ]; then
+            cp -r /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/
+          fi
+          KS=$(find / -name debug.keystore -not -path '*/proc/*' 2>/dev/null | head -1)
+          if [ -z "$KS" ]; then
+            KS=$HOME/debug.keystore
+            keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore "$KS" \
+              -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999
+          fi
+          JAVA=$(dirname $(dirname $(readlink -f $(which java))))
+          echo "Keystore: $KS | Java: $JAVA"
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            cat > ~/.config/godot/$f <<EOT
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "/usr/lib/android-sdk"
+          export/android/java_sdk_path = "$JAVA"
+          export/android/debug_keystore = "$KS"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOT
+            sed -i 's/^          //' ~/.config/godot/$f
+          done
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$KS" >> $GITHUB_ENV
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> $GITHUB_ENV
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> $GITHUB_ENV
+          sed -i "s/^version\/code=.*/version\/code=${GITHUB_RUN_NUMBER}/" export_presets.cfg
+          sed -i "s/^version\/name=.*/version\/name=\"1.0.${GITHUB_RUN_NUMBER}\"/" export_presets.cfg
+
+      - name: Importar e checar scripts
+        shell: bash
+        run: |
+          godot --headless --import --path . 2>&1 | tail -20
+          godot --headless --path . --script tests/sim_quick.gd 2>&1 | tail -20
+
+      - name: Exportar APK
+        shell: bash
+        run: |
+          mkdir -p build
+          godot --headless --path . --export-debug "Android" build/arena-rift.apk 2>&1 | tail -40
+          ls -la build
+          test -s build/arena-rift.apk
+
+      - name: Guardar APK como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: arena-rift-apk
+          path: build/arena-rift.apk
+
+      - name: Publicar Release com o APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Arena Rift 1.0.${{ github.run_number }}
+          body: |
+            APK pronto para instalar no Android.
+            Baixe o arquivo **arena-rift.apk** abaixo, abra no celular e permita "instalar apps desconhecidos" quando pedir.
+          files: build/arena-rift.apk
+          make_latest: true
