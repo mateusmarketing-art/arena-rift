@@ -5,8 +5,16 @@ extends RefCounted
 
 
 static func think(sim: Sim, u: Sim.U, _dt: float) -> Dictionary:
-	var out := {"casts": [], "buy": []}
+	var out := {"casts": [], "buy": [], "lvl": []}
 	var st: Dictionary = u.bot_state
+	# Sobe habilidades: R sempre que puder, depois Q, E, W
+	var guard := 0
+	while u.points > 0 and guard < 4:
+		guard += 1
+		for i in [3, 0, 2, 1]:
+			if sim.can_rank_up(u, i):
+				sim.rank_up(u, i)
+				break
 	var fountain: Vector2 = Data.FOUNTAIN_POS[u.team]
 	var hp_ratio := u.hp / u.max_hp
 	var at_base := u.pos.distance_to(fountain) < Data.FOUNTAIN_RADIUS
@@ -28,8 +36,13 @@ static func think(sim: Sim, u: Sim.U, _dt: float) -> Dictionary:
 		if e.kind == "hero":
 			enemy_heroes.append(e)
 
+	# Cura de invocador em perigo
+	if hp_ratio < 0.25 and u.cds[5] <= 0 and sim.time - u.last_dmg < 2.0:
+		out.casts.append([5, Vector2.ZERO, false])
 	# Recuar com vida baixa
 	if hp_ratio < 0.28 or st.get("retreat", false):
+		if hp_ratio < 0.15 and u.cds[4] <= 0 and sim.time - u.last_dmg < 1.0:
+			out.casts.append([4, (fountain - u.pos).normalized(), false])
 		st["retreat"] = hp_ratio < 0.6
 		var close := false
 		for e: Sim.U in enemy_heroes:

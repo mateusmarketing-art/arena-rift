@@ -29,7 +29,9 @@ class U:
 	var gold := 500.0
 	var hero := -1
 	var role := ""
-	var cds := [0.0, 0.0, 0.0, 0.0]
+	var cds := [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Q W E R + Flash + Cura
+	var ranks := [0, 0, 0, 0]
+	var points := 1
 	var shield := 0.0
 	var shield_t := 0.0
 	var slow := 0.0
@@ -87,6 +89,13 @@ var inputs := {}
 var camps := []
 var team_buff_t := [0.0, 0.0]
 var slots := []
+var _cast_idx := 0
+var _proj_id := 0
+
+
+func _next_proj() -> int:
+	_proj_id = (_proj_id + 1) % 30000
+	return _proj_id
 
 
 func setup(p_slots: Array) -> void:
@@ -425,6 +434,7 @@ func _give_xp(h: U, amount: float) -> void:
 		h.level += 1
 		_recalc_hero(h)
 		h.hp = minf(h.max_hp, h.hp + Data.HEROES[h.hero].hp_lvl)
+		h.points += 1
 		events.append({"t": "lvl", "a": h.id, "lvl": h.level})
 
 
@@ -437,8 +447,72 @@ func apply_effects(src: U, dst: U, a: Dictionary) -> void:
 		dst.slow_t = maxf(dst.slow_t, a.get("slow_dur", 1.5))
 
 
-func ability_damage(u: U, a: Dictionary) -> float:
-	return a.get("d", 0) + a.get("dl", 0) * (u.level - 1) + a.get("r", 0.6) * (u.b_atk + u.b_pw)
+func ability_damage(u: U, a: Dictionary, rank := -1) -> float:
+	if rank < 0:
+		rank = u.bot_state.get("_rank", 1)
+	var lvl_bonus: float = a.get("dl", 0) * (0.35 * (u.level - 1) + 2.2 * (maxi(rank, 1) - 1))
+	return a.get("d", 0) + lvl_bonus + a.get("r", 0.6) * (u.b_atk + u.b_pw)
+
+
+## Limite de nível das habilidades: Q/W/E até 4 (máx. metade do nível, arredondado
+## para cima); R nos níveis 5, 9 e 13.
+func can_rank_up(u: U, idx: int) -> bool:
+	if u.points <= 0 or idx < 0 or idx > 3:
+		return false
+	var r: int = u.ranks[idx]
+	if idx == 3:
+		return r < 3 and u.level >= [5, 9, 13][r]
+	return r < 4 and r < ceili(u.level / 2.0)
+
+
+func rank_up(u: U, idx: int) -> bool:
+	if not can_rank_up(u, idx):
+		return false
+	u.ranks[idx] += 1
+	u.points -= 1
+	events.append({"t": "rank", "a": u.id, "ab": idx, "rank": u.ranks[idx]})
+	return true
+
+
+const FLASH_DIST := 5.0
+const FLASH_CD := 150.0
+const HEAL_CD := 120.0
+
+
+func cast_spell(u: U, idx: int, dir: Vector2) -> bool:
+	# idx 4 = Flash, 5 = Cura
+	if u.dead or u.stun_t > 0 or u.cds[idx] > 0:
+		return false
+	if idx == 4:
+		if dir.length() < 0.1:
+			dir = Vector2.from_angle(u.rot)
+		dir = dir.normalized()
+		events.append({"t": "flash", "a": u.id, "x": u.pos.x, "z": u.pos.y})
+		u.pos = _clamp_map(u.pos + dir * FLASH_DIST)
+		_push_out(u)
+		u.rot = dir.angle()
+		u.dash_t = 0
+		u.recall_t = 0
+		u.cds[4] = FLASH_CD
+		events.append({"t": "flash_end", "a": u.id, "x": u.pos.x, "z": u.pos.y})
+		return true
+	if idx == 5:
+		var amt := 90.0 + 18.0 * u.level
+		heal(u, amt)
+		u.haste = 1.3
+		u.haste_t = 1.5
+		var best: U = null
+		var bd := 1e9
+		for a: U in allies_in(u.pos, u.team, 8.0):
+			if a != u and a.hp / a.max_hp < bd:
+				bd = a.hp / a.max_hp
+				best = a
+		if best:
+			heal(best, amt * 0.8)
+		u.cds[5] = HEAL_CD
+		events.append({"t": "heal", "a": u.id, "b": best.id if best else 0})
+		return true
+	return false
 
 
 # ---------------------------------------------------------------- comandos
@@ -469,15 +543,18 @@ func start_recall(u: U) -> void:
 func can_cast(u: U, idx: int) -> bool:
 	if u.dead or u.stun_t > 0 or u.dash_t > 0:
 		return false
-	if idx == 3 and u.level < 5:
+	if u.ranks[idx] < 1:
 		return false
 	return u.cds[idx] <= 0
 
 
 ## dir: direção do arrasto (comprimento 0..1). auto = mirar sozinho.
 func cast(u: U, idx: int, dir: Vector2, auto: bool) -> bool:
+	if idx == 4 or idx == 5:
+		return cast_spell(u, idx, dir)
 	if idx < 0 or idx > 3 or not can_cast(u, idx):
 		return false
+	u.bot_state["_rank"] = u.ranks[idx]
 	var a: Dictionary = Data.HEROES[u.hero].abilities[idx]
 	var rng: float = a.get("range", 0.0)
 	var point := u.pos
@@ -500,7 +577,8 @@ func cast(u: U, idx: int, dir: Vector2, auto: bool) -> bool:
 		dir = Vector2.from_angle(u.rot)
 	u.rot = dir.angle()
 	u.recall_t = 0
-	u.cds[idx] = a.cd * (1.0 - minf(0.3, u.b_pw / 400.0))
+	u.cds[idx] = a.cd * (1.0 - 0.07 * (u.ranks[idx] - 1)) * (1.0 - minf(0.3, u.b_pw / 400.0))
+	_cast_idx = idx
 	_exec(u, a, dir, point)
 	events.append({"t": "cast", "a": u.id, "ab": idx, "x": point.x, "z": point.y, "dx": dir.x, "dz": dir.y})
 	return true
@@ -527,7 +605,7 @@ func _exec(u: U, a: Dictionary, dir: Vector2, point: Vector2) -> void:
 			projectiles.append({
 				"team": u.team, "src": u.id, "pos": u.pos + dir * 0.8, "vel": dir * float(a.speed),
 				"left": float(a.range), "width": float(a.width), "dmg": ability_damage(u, a),
-				"ab": a, "pierce": a.get("pierce", false), "hit": {}, "kind": 1, "hero": u.hero,
+				"ab": a, "pierce": a.get("pierce", false), "hit": {}, "kind": 1 + _cast_idx, "hero": u.hero, "id": _next_proj(),
 			})
 		"dash":
 			var dist: float = a.dist
@@ -545,7 +623,7 @@ func _exec(u: U, a: Dictionary, dir: Vector2, point: Vector2) -> void:
 			_nova(u, u.pos, a)
 		"blast":
 			delayed.append({"at": time + float(a.delay), "src": u.id, "team": u.team, "pos": point, "ab": a,
-				"dmg": ability_damage(u, a)})
+				"dmg": ability_damage(u, a), "hero": u.hero, "abi": _cast_idx})
 			if a.get("leap", false):
 				var d := point - u.pos
 				var t: float = a.delay
@@ -911,7 +989,8 @@ func _try_attack(u: U, t: U) -> bool:
 	if u.ranged:
 		projectiles.append({"team": u.team, "src": u.id, "target": t.id, "pos": u.pos,
 			"speed": 30.0 if u.kind == "hero" else 24.0, "dmg": u.atk, "kind": 0,
-			"hero": u.hero if u.kind == "hero" else -1})
+			"hero": u.hero if u.kind == "hero" else (-2 if u.kind == "siege" else (-3 if u.kind == "tower" or u.kind == "nexus" else -1)),
+			"id": _next_proj()})
 	else:
 		damage(u, t, u.atk)
 	events.append({"t": "atk", "a": u.id, "b": t.id})
@@ -959,7 +1038,7 @@ func _tick_projectiles(dt: float) -> void:
 					break
 				p.dmg *= 0.8
 			if done or p.left <= 0:
-				events.append({"t": "pop", "x": p.pos.x, "z": p.pos.y, "hero": p.hero})
+				events.append({"t": "pop", "x": p.pos.x, "z": p.pos.y, "hero": p.hero, "kind": p.kind})
 				continue
 			keep.append(p)
 	projectiles = keep
@@ -974,7 +1053,7 @@ func _tick_delayed() -> void:
 				if src:
 					apply_effects(src, e, d.ab)
 				damage(src, e, d.dmg)
-			events.append({"t": "boom", "x": d.pos.x, "z": d.pos.y, "r": d.ab.radius, "team": d.team})
+			events.append({"t": "boom", "x": d.pos.x, "z": d.pos.y, "r": d.ab.radius, "team": d.team, "hero": d.hero, "abi": d.abi})
 		else:
 			keep.append(d)
 	delayed = keep
@@ -1007,6 +1086,8 @@ func _hero_think(u: U, dt: float) -> void:
 	else:
 		inp = inputs.get(u.id, {})
 	# Comandos pontuais (casts, compra, voltar)
+	for li in inp.get("lvl", []):
+		rank_up(u, li)
 	for c in inp.get("casts", []):
 		cast(u, c[0], c[1], c[2])
 	if inp.get("recall", false):
@@ -1017,6 +1098,7 @@ func _hero_think(u: U, dt: float) -> void:
 	if not u.bot:
 		inp["casts"] = []
 		inp["buy"] = []
+		inp["lvl"] = []
 	if u.stun_t > 0 or u.recall_t > 0:
 		return
 	var mv: Vector2 = inp.get("move", Vector2.ZERO)
@@ -1030,10 +1112,21 @@ func _hero_think(u: U, dt: float) -> void:
 		return
 	if inp.get("attack", false):
 		var t: U = null
-		if u.target and alive(u.target) and targetable(units[u.target]) and u.pos.distance_to(units[u.target].pos) < u.arange + 5:
+		var mode: int = inp.get("attack_mode", 0)
+		if mode == 0 and u.target and alive(u.target) and targetable(units[u.target]) and u.pos.distance_to(units[u.target].pos) < u.arange + 5:
 			t = units[u.target]
-		else:
+		elif mode == 0:
 			t = nearest_enemy(u, u.arange + 4.0, true)
+		else:
+			var bd := 1e9
+			for e: U in enemies_in(u.pos, u.team, u.arange + 5.0):
+				var is_struct := e.kind == "tower" or e.kind == "nexus"
+				if (mode == 2) != is_struct or e.kind == "hero":
+					continue
+				var dd := u.pos.distance_to(e.pos) + (e.hp / 60.0 if mode == 1 else 0.0)
+				if dd < bd:
+					bd = dd
+					t = e
 		if t:
 			u.target = t.id
 			_chase_attack(u, t, dt)
@@ -1156,7 +1249,7 @@ const HEADER := 12  # bytes: tempo (float), placar x2, vencedor, n unidades
 func snapshot() -> PackedByteArray:
 	var n := order.size()
 	var buf := PackedByteArray()
-	buf.resize(HEADER + n * STRIDE * 2 + 2 + projectiles.size() * 10)
+	buf.resize(HEADER + n * STRIDE * 2 + 2 + projectiles.size() * 12)
 	buf.encode_float(0, time)
 	buf.encode_s16(4, score[0])
 	buf.encode_s16(6, score[1])
@@ -1198,7 +1291,8 @@ func snapshot() -> PackedByteArray:
 		buf.encode_s16(o + 4, p.kind)
 		buf.encode_s16(o + 6, p.team)
 		buf.encode_s16(o + 8, p.hero)
-		o += 10
+		buf.encode_s16(o + 10, p.id)
+		o += 12
 	return buf
 
 
@@ -1206,6 +1300,7 @@ func private_info(u: U) -> Dictionary:
 	return {
 		"gold": int(u.gold), "xp": u.xp, "next": Data.xp_to_next(u.level), "lvl": u.level,
 		"cds": u.cds.duplicate(), "items": u.items.duplicate(), "respawn": u.respawn_t,
+		"ranks": u.ranks.duplicate(), "points": u.points,
 		"atk": u.atk, "armor": u.armor, "pw": u.b_pw, "speed": u.speed, "recall": u.recall_t,
 	}
 

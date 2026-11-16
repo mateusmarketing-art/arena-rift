@@ -49,3 +49,22 @@ Jogar pela internet (cada um em sua casa) exige um servidor intermediário e ain
 - `scripts/hud.gd` — controles de toque e interface.
 - `scripts/net.gd` / `scripts/game.gd` — sala, rede e partida.
 - `tests/` — partida completa só com bots (`godot --headless --path . --script tests/sim_test.gd`).
+
+## Modelos 3D (Blender)
+
+Todos os personagens, tropas, monstros, torres, Nexus, árvores e pedras são gerados por scripts do Blender em `tools/blender/` (com esqueleto e animações de parado, correr, atacar, lançar e morrer) e exportados para `assets/models/*.glb`.
+
+```bash
+pip install bpy            # Blender como módulo Python
+python3 tools/blender/heroes.py
+python3 tools/blender/world.py
+python3 tools/make_map_mask.py
+```
+
+## Controles (estilo Wild Rift)
+
+- Analógico fixo à esquerda.
+- Ataque grande à direita, com botões **Tropa** e **Torre** para escolher o alvo.
+- **Q, W, E** em arco e **R** (suprema) acima; toque para mirar sozinho ou arraste para mirar. Arraste até **Cancelar** para desistir.
+- **+** em cima da habilidade para subir de nível (o R libera nos níveis 5, 9 e 13).
+- **Flash** (arraste para escolher a direção) e **Cura**.

@@ -16,7 +16,7 @@ var sim: Sim
 var view: WorldView
 var hud: Hud
 var cam: Camera3D
-var input := {"move": Vector2.ZERO, "attack": false, "casts": [], "buy": [], "recall": false}
+var input := {"move": Vector2.ZERO, "attack": false, "attack_mode": 0, "casts": [], "buy": [], "recall": false, "lvl": []}
 var peer_hero := {}
 var pending_events := []
 var snap_t := 0.0
@@ -44,9 +44,10 @@ func _ready() -> void:
 	name = "Game"
 	view = WorldView.new()
 	view.local_hero = my_id
+	view.local_team = my_team
 	add_child(view)
 	cam = Camera3D.new()
-	cam.fov = 48
+	cam.fov = 44
 	cam.far = 400
 	add_child(cam)
 	cam.current = true
@@ -62,6 +63,8 @@ func _ready() -> void:
 	layer.add_child(hud)
 	hud.move_changed.connect(func(v): input.move = v)
 	hud.attack_changed.connect(func(h): input.attack = h)
+	hud.attack_mode_changed.connect(_on_attack_mode)
+	hud.level_requested.connect(_on_level)
 	hud.cast_requested.connect(_on_cast)
 	hud.aim_changed.connect(_on_aim)
 	hud.recall_requested.connect(_on_recall)
@@ -80,7 +83,7 @@ func _ready() -> void:
 		sim.inputs[my_id] = input
 		for p in peer_hero:
 			if peer_hero[p] != my_id:
-				sim.inputs[peer_hero[p]] = {"move": Vector2.ZERO, "attack": false, "casts": [], "buy": [], "recall": false}
+				sim.inputs[peer_hero[p]] = {"move": Vector2.ZERO, "attack": false, "attack_mode": 0, "casts": [], "buy": [], "recall": false, "lvl": []}
 	hud.push_feed("Bem-vindo à Arena! Destrua o Nexus inimigo.", Color(1, 0.9, 0.5))
 
 
@@ -130,9 +133,9 @@ func _process(dt: float) -> void:
 	var target := view.hero_world_pos(my_id)
 	if target != Vector3.ZERO:
 		cam_target = cam_target.lerp(target, 1.0 - exp(-dt * 8.0))
-	var off := Vector3(0, 31, 19)
+	var off := Vector3(0, 19.5, 12.5)
 	if my_team == Data.TEAM_RED:
-		off = Vector3(0, 31, -19)
+		off = Vector3(0, 19.5, -12.5)
 	cam.position = cam_target + off
 	cam.look_at(cam_target + Vector3(0, 1, 0), Vector3.UP)
 
@@ -148,12 +151,30 @@ func _on_cast(idx: int, dir: Vector2, auto: bool) -> void:
 		_c_cast.rpc_id(1, idx, dir, auto)
 
 
+func _on_attack_mode(m: int) -> void:
+	if is_server:
+		input.attack_mode = m
+	else:
+		_c_mode.rpc_id(1, m)
+
+
+func _on_level(idx: int) -> void:
+	if is_server:
+		input.lvl.append(idx)
+	else:
+		_c_lvl.rpc_id(1, idx)
+
+
 func _on_aim(idx: int, dir: Vector2) -> void:
 	aiming = idx
-	if idx < 0:
+	if idx < 0 or idx == 5:
 		view.hide_aim()
 		return
-	var ab: Dictionary = Data.HEROES[slots[my_id - 1].hero].abilities[idx]
+	var ab: Dictionary
+	if idx == 4:
+		ab = {"type": "blink", "dist": Sim.FLASH_DIST, "range": Sim.FLASH_DIST}
+	else:
+		ab = Data.HEROES[slots[my_id - 1].hero].abilities[idx]
 	view.show_aim(my_id, ab, dir)
 
 
@@ -233,7 +254,25 @@ func _c_cast(idx: int, dir: Vector2, auto: bool) -> void:
 		return
 	var hid: int = peer_hero.get(multiplayer.get_remote_sender_id(), 0)
 	if hid and sim.inputs.has(hid):
-		sim.inputs[hid].casts.append([clampi(idx, 0, 3), dir.limit_length(1.0), auto])
+		sim.inputs[hid].casts.append([clampi(idx, 0, 5), dir.limit_length(1.0), auto])
+
+
+@rpc("any_peer", "reliable")
+func _c_mode(m: int) -> void:
+	if not is_server:
+		return
+	var hid: int = peer_hero.get(multiplayer.get_remote_sender_id(), 0)
+	if hid and sim.inputs.has(hid):
+		sim.inputs[hid].attack_mode = clampi(m, 0, 2)
+
+
+@rpc("any_peer", "reliable")
+func _c_lvl(idx: int) -> void:
+	if not is_server:
+		return
+	var hid: int = peer_hero.get(multiplayer.get_remote_sender_id(), 0)
+	if hid and sim.inputs.has(hid):
+		sim.inputs[hid].lvl.append(clampi(idx, 0, 3))
 
 
 @rpc("any_peer", "reliable")

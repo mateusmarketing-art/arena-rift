@@ -26,8 +26,10 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		test_mode = arg
 	match test_mode:
-		"--autotest":
+		"--autotest", "--shot":
 			Net.start_offline()
+			if test_mode == "--shot":
+				_shots()
 			return
 		"--autohost":
 			Net.my_name = "Host"
@@ -44,6 +46,16 @@ func _ready() -> void:
 			_show_join()
 			return
 	_show_main()
+
+
+func _shots() -> void:
+	Engine.time_scale = 3.0
+	for i in range(4):
+		await get_tree().create_timer([4.0, 75.0, 140.0, 220.0][i] - ([0.0, 4.0, 75.0, 140.0][i])).timeout
+		var img := get_viewport().get_texture().get_image()
+		img.save_png("/tmp/shot_%d.png" % i)
+		print("[teste] captura ", i)
+	get_tree().quit()
 
 
 func _process(_dt: float) -> void:
@@ -333,7 +345,7 @@ func _on_game_started(slots: Array, my_peer: int) -> void:
 		screen = null
 	game = Game.new()
 	game.name = "Game"
-	game.autoplay = test_mode == "--autotest"
+	game.autoplay = test_mode == "--autotest" or test_mode == "--shot"
 	game.test_log = test_mode != ""
 	game.setup(slots, my_peer, not Net.online or Net.is_host)
 	game.finished.connect(_on_game_finished)

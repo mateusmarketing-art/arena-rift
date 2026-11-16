@@ -5,6 +5,8 @@ extends Control
 
 signal move_changed(v: Vector2)
 signal attack_changed(held: bool)
+signal attack_mode_changed(mode: int)
+signal level_requested(idx: int)
 signal cast_requested(idx: int, dir: Vector2, auto: bool)
 signal aim_changed(idx: int, dir: Vector2)
 signal recall_requested
@@ -26,6 +28,8 @@ var joy_index := -1
 var joy_center := Vector2.ZERO
 var joy_pos := Vector2.ZERO
 var atk_index := -1
+var atk_mode := 0  # 0 = automático, 1 = só tropas, 2 = só torres
+var aim_cancel := false
 var aim_index := -1
 var aim_ab := -1
 var aim_start := Vector2.ZERO
@@ -45,10 +49,17 @@ var menu_panel: PanelContainer
 
 
 func _ready() -> void:
-	set_anchors_preset(Control.PRESET_FULL_RECT)
+	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_fit()
+	get_viewport().size_changed.connect(_fit)
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	font = ThemeDB.fallback_font
 	_build_panels()
+
+
+func _fit() -> void:
+	position = Vector2.ZERO
+	size = get_viewport().get_visible_rect().size
 
 
 func _build_panels() -> void:
@@ -158,16 +169,22 @@ func _item_stats(it: Dictionary) -> String:
 
 func _layout() -> Dictionary:
 	ui = clampf(size.y / 900.0, 0.6, 2.0)
-	var br := Vector2(size.x, size.y)
-	var atk := br - Vector2(170, 165) * ui
+	var A := Vector2(size.x - 175 * ui, size.y - 160 * ui)  # botão de ataque
 	return {
-		"joy_home": Vector2(230, size.y / ui - 210) * ui,
-		"joy_r": 115.0 * ui,
-		"atk": atk, "atk_r": 88.0 * ui,
-		"ab": [atk + Vector2(-205, 35) * ui, atk + Vector2(-175, -120) * ui, atk + Vector2(-45, -205) * ui, atk + Vector2(-330, -100) * ui],
-		"ab_r": 58.0 * ui,
-		"recall": atk + Vector2(-400, 85) * ui, "small_r": 42.0 * ui,
-		"shop": Vector2(60, 330) * ui,
+		"joy_home": Vector2(250 * ui, size.y - 230 * ui),
+		"joy_r": 125.0 * ui,
+		"atk": A, "atk_r": 92.0 * ui,
+		# Q, W, E, R em arco em volta do ataque (como no Wild Rift)
+		"ab": [A + Vector2(-205, 38) * ui, A + Vector2(-178, -128) * ui, A + Vector2(-42, -212) * ui, A + Vector2(-330, -118) * ui],
+		"ab_r": [62.0 * ui, 62.0 * ui, 62.0 * ui, 70.0 * ui],
+		# Feitiços de invocador: Flash (D) e Cura (F)
+		"sp": [A + Vector2(-340, 62) * ui, A + Vector2(-450, -10) * ui],
+		"sp_r": 48.0 * ui,
+		"minion": A + Vector2(-62, 112) * ui, "tower": A + Vector2(105, -140) * ui, "tgt_r": 36.0 * ui,
+		"cancel": A + Vector2(-190, -420) * ui, "cancel_r": 62.0 * ui,
+		"recall": Vector2(size.x * 0.5 - 70 * ui, size.y - 62 * ui),
+		"small_r": 42.0 * ui,
+		"shop": Vector2(60 * ui, 360 * ui),
 		"board": Vector2(size.x - 60 * ui, 60 * ui),
 		"menu": Vector2(size.x - 160 * ui, 60 * ui),
 		"mini": Rect2(Vector2(14, 14) * ui, Vector2(250, 250) * ui),
@@ -229,6 +246,13 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			KEY_2: cast_requested.emit(1, Vector2.ZERO, true)
 			KEY_3: cast_requested.emit(2, Vector2.ZERO, true)
 			KEY_4: cast_requested.emit(3, Vector2.ZERO, true)
+			KEY_F: cast_requested.emit(4, Vector2.ZERO, true)
+			KEY_H: cast_requested.emit(5, Vector2.ZERO, true)
+			KEY_U:
+				for i in [3, 0, 2, 1]:
+					if _can_rank(i):
+						level_requested.emit(i)
+						break
 			KEY_B: recall_requested.emit()
 			KEY_P: shop_panel.visible = not shop_panel.visible
 			KEY_TAB: _toggle_board()
@@ -245,6 +269,18 @@ func _overlay_open() -> bool:
 	return shop_panel.visible or board_panel.visible or end_panel.visible or menu_panel.visible
 
 
+func _can_rank(idx: int) -> bool:
+	var pts: int = priv.get("points", 0)
+	if pts <= 0:
+		return false
+	var ranks: Array = priv.get("ranks", [0, 0, 0, 0])
+	var lvl: int = priv.get("lvl", 1)
+	var r: int = ranks[idx]
+	if idx == 3:
+		return r < 3 and lvl >= [5, 9, 13][r]
+	return r < 4 and r < ceili(lvl / 2.0)
+
+
 func _input(event: InputEvent) -> void:
 	if _overlay_open():
 		if joy_index >= 0 or atk_index >= 0 or aim_index >= 0:
@@ -254,20 +290,36 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch:
 		var p: Vector2 = event.position
 		if event.pressed:
-			if p.distance_to(L.atk) < L.atk_r * 1.15 and atk_index < 0:
+			# "+" para subir habilidade
+			for i in range(4):
+				if _can_rank(i) and p.distance_to(L.ab[i] + Vector2(0, -L.ab_r[i] - 20 * ui)) < 30 * ui:
+					level_requested.emit(i)
+					_handled()
+					return
+			if p.distance_to(L.atk) < L.atk_r * 1.1 and atk_index < 0:
 				atk_index = event.index
+				_set_attack_mode(0)
 				attack_changed.emit(true)
 				_handled()
 				return
-			for i in range(4):
-				if p.distance_to(L.ab[i]) < L.ab_r * 1.2 and aim_index < 0:
-					aim_index = event.index
-					aim_ab = i
-					aim_start = p
-					aim_cur = p
-					aim_changed.emit(i, Vector2.ZERO)
+			for t in [["minion", 1], ["tower", 2]]:
+				if p.distance_to(L[t[0]]) < L.tgt_r * 1.25 and atk_index < 0:
+					atk_index = event.index
+					_set_attack_mode(t[1])
+					attack_changed.emit(true)
 					_handled()
 					return
+			for i in range(4):
+				if p.distance_to(L.ab[i]) < L.ab_r[i] * 1.15 and aim_index < 0:
+					_start_aim(event.index, i, p)
+					return
+			if p.distance_to(L.sp[0]) < L.sp_r * 1.2 and aim_index < 0:
+				_start_aim(event.index, 4, p)
+				return
+			if p.distance_to(L.sp[1]) < L.sp_r * 1.2:
+				cast_requested.emit(5, Vector2.ZERO, true)
+				_handled()
+				return
 			if p.distance_to(L.recall) < L.small_r * 1.3:
 				recall_requested.emit()
 				_handled()
@@ -284,11 +336,11 @@ func _input(event: InputEvent) -> void:
 				menu_panel.visible = true
 				_handled()
 				return
-			if p.x < size.x * 0.48 and p.y > size.y * 0.3 and joy_index < 0:
+			if p.x < size.x * 0.45 and p.y > size.y * 0.35 and joy_index < 0:
 				joy_index = event.index
-				joy_center = p
+				joy_center = L.joy_home
 				joy_pos = p
-				move_changed.emit(Vector2.ZERO)
+				_update_joy(L)
 				_handled()
 		else:
 			if event.index == joy_index:
@@ -297,24 +349,47 @@ func _input(event: InputEvent) -> void:
 			elif event.index == atk_index:
 				atk_index = -1
 				attack_changed.emit(key_attack)
+				_set_attack_mode(0)
 			elif event.index == aim_index:
-				var d := (aim_cur - aim_start) / (130.0 * ui)
-				var auto := d.length() < 0.25
+				var d := (aim_cur - aim_start) / (140.0 * ui)
+				var auto := d.length() < 0.22
+				var cancel: bool = aim_cur.distance_to(L.cancel) < L.cancel_r * 1.2
 				aim_index = -1
 				aim_changed.emit(-1, Vector2.ZERO)
-				cast_requested.emit(aim_ab, to_world(d.limit_length(1.0)), auto)
+				if not cancel:
+					cast_requested.emit(aim_ab, to_world(d.limit_length(1.0)), auto)
 	elif event is InputEventScreenDrag:
 		if event.index == joy_index:
 			joy_pos = event.position
-			var v: Vector2 = (joy_pos - joy_center) / L.joy_r
-			if v.length() > 1.0:
-				joy_center = joy_pos - v.normalized() * L.joy_r
-				v = v.normalized()
-			move_changed.emit(to_world(v if v.length() > 0.12 else Vector2.ZERO))
+			_update_joy(L)
 		elif event.index == aim_index:
 			aim_cur = event.position
-			var d2 := (aim_cur - aim_start) / (130.0 * ui)
-			aim_changed.emit(aim_ab, to_world(d2.limit_length(1.0)))
+			aim_cancel = aim_cur.distance_to(L.cancel) < L.cancel_r * 1.2
+			var d2 := (aim_cur - aim_start) / (140.0 * ui)
+			aim_changed.emit(-1 if aim_cancel else aim_ab, to_world(d2.limit_length(1.0)))
+
+
+func _start_aim(index: int, ab: int, p: Vector2) -> void:
+	aim_index = index
+	aim_ab = ab
+	aim_start = p
+	aim_cur = p
+	aim_cancel = false
+	aim_changed.emit(ab, Vector2.ZERO)
+	_handled()
+
+
+func _update_joy(L: Dictionary) -> void:
+	var v: Vector2 = (joy_pos - joy_center) / L.joy_r
+	if v.length() > 1.0:
+		v = v.normalized()
+	move_changed.emit(to_world(v if v.length() > 0.12 else Vector2.ZERO))
+
+
+func _set_attack_mode(m: int) -> void:
+	if atk_mode != m:
+		atk_mode = m
+		attack_mode_changed.emit(m)
 
 
 func _handled() -> void:
@@ -404,7 +479,7 @@ func _draw_bars() -> void:
 		var w := 44.0
 		var th := 6.0
 		match d.kind:
-			0: h = 3.0; w = 96.0; th = 11.0
+			0: h = 3.9; w = 104.0; th = 12.0
 			3: h = 2.2; w = 56.0
 			4: h = 9.2; w = 120.0; th = 10.0
 			5: h = 8.0; w = 150.0; th = 12.0
@@ -514,57 +589,157 @@ func _draw_top() -> void:
 
 
 func _draw_controls(L: Dictionary) -> void:
-	# Joystick
-	var jc: Vector2 = joy_center if joy_index >= 0 else L.joy_home
-	var jp: Vector2 = joy_pos if joy_index >= 0 else L.joy_home
-	draw_circle(jc, L.joy_r, Color(1, 1, 1, 0.08))
-	draw_arc(jc, L.joy_r, 0, TAU, 48, Color(1, 1, 1, 0.35), 3 * ui)
-	draw_circle(jp, L.joy_r * 0.42, Color(1, 1, 1, 0.45))
+	# Analógico
+	var jc: Vector2 = L.joy_home
+	var jp: Vector2 = jc
+	if joy_index >= 0:
+		jp = jc + (joy_pos - jc).limit_length(L.joy_r)
+	draw_circle(jc, L.joy_r, Color(0.05, 0.08, 0.14, 0.35))
+	draw_arc(jc, L.joy_r, 0, TAU, 64, Color(0.75, 0.85, 1.0, 0.55), 4 * ui)
+	draw_arc(jc, L.joy_r * 0.55, 0, TAU, 48, Color(0.75, 0.85, 1.0, 0.15), 2 * ui)
+	draw_circle(jp, L.joy_r * 0.42, Color(0.85, 0.92, 1.0, 0.75))
+	draw_arc(jp, L.joy_r * 0.42, 0, TAU, 40, Color(1, 1, 1, 0.9), 3 * ui)
 	# Ataque
-	var pressed := atk_index >= 0 or key_attack
-	draw_circle(L.atk, L.atk_r, Color(0.7, 0.2, 0.15, 0.85 if pressed else 0.6))
-	draw_arc(L.atk, L.atk_r, 0, TAU, 48, Color(1, 0.8, 0.5), 4 * ui)
-	_text_center(L.atk + Vector2(0, 10 * ui), "ATACAR", 24, Color(1, 1, 1))
+	var pressed := (atk_index >= 0 and atk_mode == 0) or key_attack
+	draw_circle(L.atk, L.atk_r + 6 * ui, Color(0, 0, 0, 0.45))
+	draw_circle(L.atk, L.atk_r, Color(0.62, 0.16, 0.1, 0.95 if pressed else 0.8))
+	draw_circle(L.atk, L.atk_r * 0.78, Color(0.82, 0.28, 0.16, 0.95 if pressed else 0.8))
+	draw_arc(L.atk, L.atk_r, 0, TAU, 56, Color(1, 0.82, 0.45), 5 * ui)
+	_sword_icon(L.atk, L.atk_r * 0.55)
+	# Alvo: tropa / torre
+	_target_btn(L.minion, L.tgt_r, "Tropa", atk_mode == 1)
+	_target_btn(L.tower, L.tgt_r, "Torre", atk_mode == 2)
 	# Habilidades
-	var cds: Array = priv.get("cds", [0, 0, 0, 0])
-	var lvl: int = priv.get("lvl", 1)
+	var cds: Array = priv.get("cds", [0, 0, 0, 0, 0, 0])
+	var ranks: Array = priv.get("ranks", [0, 0, 0, 0])
 	var abilities: Array = Data.HEROES[my_hero].abilities
+	var hc: Color = Data.HEROES[my_hero].color
 	for i in range(4):
 		var c: Vector2 = L.ab[i]
-		var rr: float = L.ab_r
-		var hc: Color = Data.HEROES[my_hero].color
-		var locked := i == 3 and lvl < 5
-		draw_circle(c, rr, Color(0.06, 0.07, 0.12, 0.9))
-		draw_circle(c, rr - 5 * ui, hc.darkened(0.35) if not locked else Color(0.2, 0.2, 0.22))
+		var rr: float = L.ab_r[i]
+		var rank: int = ranks[i] if i < ranks.size() else 0
+		var locked := rank <= 0
+		draw_circle(c, rr + 5 * ui, Color(0, 0, 0, 0.5))
+		draw_circle(c, rr, hc.darkened(0.25) if not locked else Color(0.18, 0.18, 0.2, 0.9))
+		draw_circle(c, rr * 0.72, hc.darkened(0.5) if not locked else Color(0.12, 0.12, 0.14, 0.9))
+		_ability_icon(c, rr * 0.5, abilities[i].type, Color(1, 1, 1, 0.9 if not locked else 0.3))
 		var cd: float = cds[i] if i < cds.size() else 0.0
-		var total: float = abilities[i].cd
 		if cd > 0 and not locked:
-			var frac := clampf(cd / total, 0.0, 1.0)
-			draw_circle(c, rr - 5 * ui, Color(0, 0, 0, 0.55))
-			draw_arc(c, rr - 3 * ui, -PI / 2, -PI / 2 + TAU * frac, 32, Color(0.1, 0.1, 0.1, 0.9), 6 * ui)
+			var frac := clampf(cd / float(abilities[i].cd), 0.0, 1.0)
+			_pie(c, rr, frac, Color(0, 0, 0, 0.62))
 			_text_center(c + Vector2(0, 12 * ui), "%d" % ceil(cd), 34, Color(1, 1, 1))
-		else:
-			_text_center(c + Vector2(0, 2 * ui), abilities[i].key, 30, Color(1, 1, 1) if not locked else Color(0.6, 0.6, 0.6))
-			_text_center(c + Vector2(0, 26 * ui), "Nv 5" if locked else abilities[i].name.left(12), 13, Color(1, 1, 1, 0.85))
-		draw_arc(c, rr, 0, TAU, 40, Color(1, 0.85, 0.5) if (cd <= 0 and not locked) else Color(0.4, 0.4, 0.45), 3 * ui)
+		draw_arc(c, rr, 0, TAU, 48, Color(1, 0.85, 0.5) if (cd <= 0 and not locked) else Color(0.45, 0.45, 0.5), 4 * ui)
+		_text_center(c + Vector2(rr * 0.62, rr * 0.95), abilities[i].key, 18, Color(1, 0.9, 0.6))
+		# Pontinhos de nível da habilidade
+		var maxr := 3 if i == 3 else 4
+		for k in range(maxr):
+			var dp := c + Vector2((k - (maxr - 1) / 2.0) * 13 * ui, rr + 12 * ui)
+			draw_circle(dp, 4.5 * ui, Color(1, 0.8, 0.3) if k < rank else Color(0.2, 0.2, 0.25, 0.9))
+		if _can_rank(i):
+			var up := c + Vector2(0, -rr - 20 * ui)
+			draw_circle(up, 22 * ui, Color(0.15, 0.1, 0.02, 0.9))
+			draw_circle(up, 18 * ui, Color(1.0, 0.78, 0.25))
+			_text_center(up + Vector2(0, 10 * ui), "+", 30, Color(0.25, 0.12, 0.0))
 		if aim_index >= 0 and aim_ab == i:
-			var d := (aim_cur - aim_start).limit_length(130.0 * ui)
-			draw_circle(c, 130.0 * ui, Color(1, 1, 1, 0.06))
-			draw_circle(c + d, 26 * ui, Color(1, 1, 1, 0.6))
-			if d.length() < 0.25 * 130.0 * ui:
-				_text_center(c - Vector2(0, rr + 18 * ui), "solte para mirar sozinho", 15, Color(1, 1, 1, 0.8))
+			_draw_aim_stick(c)
+	# Feitiços
+	var names := ["Flash", "Cura"]
+	var cols := [Color(1.0, 0.9, 0.4), Color(0.4, 1.0, 0.55)]
+	var maxcd := [Sim.FLASH_CD, Sim.HEAL_CD]
+	for j in range(2):
+		var c2: Vector2 = L.sp[j]
+		var r2: float = L.sp_r
+		var cd2: float = cds[4 + j] if cds.size() > 4 + j else 0.0
+		draw_circle(c2, r2 + 4 * ui, Color(0, 0, 0, 0.5))
+		draw_circle(c2, r2, cols[j].darkened(0.55))
+		draw_circle(c2, r2 * 0.55, cols[j].darkened(0.1))
+		if cd2 > 0:
+			_pie(c2, r2, clampf(cd2 / maxcd[j], 0, 1), Color(0, 0, 0, 0.65))
+			_text_center(c2 + Vector2(0, 10 * ui), "%d" % ceil(cd2), 26, Color(1, 1, 1))
+		draw_arc(c2, r2, 0, TAU, 40, cols[j] if cd2 <= 0 else Color(0.4, 0.4, 0.45), 3 * ui)
+		_text_center(c2 + Vector2(0, r2 + 20 * ui), names[j], 16, Color(1, 1, 1, 0.9))
+		if aim_index >= 0 and aim_ab == 4 + j:
+			_draw_aim_stick(c2)
+	# Cancelar mira
+	if aim_index >= 0:
+		var cc: Vector2 = L.cancel
+		draw_circle(cc, L.cancel_r, Color(0.7, 0.1, 0.1, 0.85 if aim_cancel else 0.45))
+		draw_arc(cc, L.cancel_r, 0, TAU, 40, Color(1, 0.6, 0.6), 3 * ui)
+		var x: float = L.cancel_r * 0.35
+		draw_line(cc - Vector2(x, x), cc + Vector2(x, x), Color(1, 1, 1), 5 * ui)
+		draw_line(cc + Vector2(-x, x), cc + Vector2(x, -x), Color(1, 1, 1), 5 * ui)
+		_text_center(cc + Vector2(0, L.cancel_r + 24 * ui), "Cancelar", 18, Color(1, 0.85, 0.85))
 	# Botões pequenos
 	_small_btn(L.recall, L.small_r, "Base", Color(0.25, 0.45, 0.85))
 	_small_btn(L.shop, L.small_r, "Loja", Color(0.8, 0.6, 0.15))
 	_small_btn(L.board, L.small_r, "Placar", Color(0.35, 0.35, 0.45))
 	_small_btn(L.menu, L.small_r, "Menu", Color(0.35, 0.35, 0.45))
 	# Nível e experiência
+	var lvl: int = priv.get("lvl", 1)
 	var xp: float = priv.get("xp", 0.0)
 	var nxt: float = priv.get("next", 1.0)
-	var bar := Rect2(Vector2(size.x / 2 - 160 * ui, size.y - 30 * ui), Vector2(320 * ui, 12 * ui))
+	var bar := Rect2(Vector2(size.x / 2 - 170 * ui, 76 * ui), Vector2(340 * ui, 9 * ui))
 	draw_rect(bar.grow(2 * ui), Color(0, 0, 0, 0.75))
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * clampf(xp / nxt, 0, 1) if lvl < 15 else bar.size.x, bar.size.y)), Color(0.65, 0.4, 1.0))
-	_text_center(bar.position + Vector2(bar.size.x / 2, -8 * ui), "Nível %d  •  %s" % [lvl, Data.HEROES[my_hero].name], 20, Color(1, 1, 1))
+	_text_center(bar.position + Vector2(bar.size.x / 2, 30 * ui), "Nível %d  •  %s" % [lvl, Data.HEROES[my_hero].name], 18, Color(1, 1, 1))
+
+
+func _draw_aim_stick(c: Vector2) -> void:
+	var d := (aim_cur - aim_start).limit_length(140.0 * ui)
+	draw_circle(c, 140.0 * ui, Color(0.4, 0.7, 1.0, 0.12))
+	draw_arc(c, 140.0 * ui, 0, TAU, 48, Color(0.6, 0.85, 1.0, 0.5), 2 * ui)
+	draw_circle(c + d, 30 * ui, Color(0.85, 0.95, 1.0, 0.85))
+	if d.length() < 0.22 * 140.0 * ui:
+		_text_center(c - Vector2(0, 158 * ui), "solte para mirar sozinho", 16, Color(1, 1, 1, 0.85))
+
+
+func _pie(c: Vector2, r: float, frac: float, col: Color) -> void:
+	if frac <= 0.0:
+		return
+	var pts := PackedVector2Array([c])
+	var steps := maxi(3, int(40 * frac))
+	for k in range(steps + 1):
+		var a := -PI / 2 + TAU * frac * k / steps
+		pts.append(c + Vector2(cos(a), sin(a)) * r)
+	draw_colored_polygon(pts, col)
+
+
+func _sword_icon(c: Vector2, s: float) -> void:
+	var col := Color(1, 0.95, 0.85)
+	draw_line(c + Vector2(-s, s), c + Vector2(s * 0.8, -s * 0.8), col, 7 * ui)
+	draw_line(c + Vector2(-s * 0.45, s * 0.05), c + Vector2(-s * 0.05, s * 0.45), col, 7 * ui)
+	draw_line(c + Vector2(-s * 0.8, -s * 0.8), c + Vector2(s, s), Color(col.r, col.g, col.b, 0.55), 5 * ui)
+
+
+func _ability_icon(c: Vector2, s: float, type: String, col: Color) -> void:
+	match type:
+		"skillshot":
+			draw_line(c + Vector2(-s, s * 0.6), c + Vector2(s, -s * 0.6), col, 6 * ui)
+			draw_circle(c + Vector2(s, -s * 0.6), 9 * ui, col)
+		"dash", "blink":
+			for k in range(3):
+				var o := Vector2(-s + k * s * 0.7, 0)
+				draw_polyline(PackedVector2Array([c + o + Vector2(0, -s * 0.5), c + o + Vector2(s * 0.45, 0), c + o + Vector2(0, s * 0.5)]), col, 5 * ui)
+		"nova":
+			draw_arc(c, s, 0, TAU, 32, col, 5 * ui)
+			draw_arc(c, s * 0.5, 0, TAU, 24, col, 4 * ui)
+		"blast":
+			draw_circle(c, s * 0.45, col)
+			for k in range(8):
+				var a := TAU * k / 8
+				draw_line(c + Vector2(cos(a), sin(a)) * s * 0.6, c + Vector2(cos(a), sin(a)) * s, col, 4 * ui)
+		"buff":
+			draw_colored_polygon(PackedVector2Array([c + Vector2(0, -s), c + Vector2(s * 0.85, -s * 0.5), c + Vector2(s * 0.7, s * 0.4), c + Vector2(0, s), c + Vector2(-s * 0.7, s * 0.4), c + Vector2(-s * 0.85, -s * 0.5)]), Color(col.r, col.g, col.b, col.a * 0.8))
+		"heal":
+			draw_rect(Rect2(c - Vector2(s * 0.22, s), Vector2(s * 0.44, s * 2)), col)
+			draw_rect(Rect2(c - Vector2(s, s * 0.22), Vector2(s * 2, s * 0.44)), col)
+
+
+func _target_btn(c: Vector2, r: float, label: String, on: bool) -> void:
+	draw_circle(c, r + 3 * ui, Color(0, 0, 0, 0.5))
+	draw_circle(c, r, Color(0.55, 0.2, 0.12, 0.9) if on else Color(0.25, 0.22, 0.24, 0.85))
+	draw_arc(c, r, 0, TAU, 32, Color(1, 0.8, 0.5), 3 * ui)
+	_text_center(c + Vector2(0, 6 * ui), label, 15, Color(1, 1, 1))
 
 
 func _small_btn(c: Vector2, r: float, label: String, col: Color) -> void:
@@ -574,7 +749,7 @@ func _small_btn(c: Vector2, r: float, label: String, col: Color) -> void:
 
 
 func _draw_feed() -> void:
-	var y := 105.0 * ui
+	var y := 150.0 * ui
 	for f in feed:
 		_text_center(Vector2(size.x / 2, y), f.text, 22, f.color)
 		y += 30 * ui
